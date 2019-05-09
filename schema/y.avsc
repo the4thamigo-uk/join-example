@@ -1,0 +1,17 @@
+{
+  "type": "record",
+    "name": "y",
+    "fields": [
+    {
+      "name": "event_time",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      }
+    },
+    {
+      "name": "y",
+      "type": "int"
+    }
+    ]
+}
