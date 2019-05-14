@@ -37,6 +37,10 @@ class JoinerStreamProcessor {
         props.put("auto.offset.reset", "earliest");
         props.put("schema.registry.url", "http://schema-registry:8081");
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, GenericAvroSerde.class.getName());
+        props.put(StreamsConfig.consumerPrefix(StreamsConfig.BUFFERED_RECORDS_PER_PARTITION_CONFIG), 1 );
+        props.put("buffered.bytes.per.partition", 128 );
+        props.put("max.partition.fetch.bytes", 128 );
+        props.put("fetch.max.bytes", 128 );
 
 
         final StreamsBuilder builder = new StreamsBuilder();
