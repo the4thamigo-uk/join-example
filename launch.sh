@@ -8,7 +8,7 @@ docker stop join-example || true
 docker run --env-file <(cat << EOF
 JOIN_WINDOW_BEFORE_SIZE=PT9S
 JOIN_WINDOW_AFTER_SIZE=PT0S
-JOIN_WINDOW_GRACE=PT10S
+JOIN_WINDOW_GRACE=PT20S
 EOF
 ) --name join-example --rm -ti -p 9100:9100 --network join-example_default join-example:latest
 
