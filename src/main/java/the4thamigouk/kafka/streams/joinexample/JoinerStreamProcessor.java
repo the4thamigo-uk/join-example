@@ -1,114 +1,23 @@
 package the4thamigouk.kafka.streams.joinexample;
 
-import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
 import io.confluent.kafka.streams.serdes.avro.GenericAvroSerde;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
-import org.apache.kafka.streams.processor.*;
+import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.processor.TimestampExtractor;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 
-import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayDeque;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
-
-import static org.apache.kafka.common.utils.Utils.max;
 
 class JoinerStreamProcessor {
 
     private static final Logger log = LogManager.getLogger(JoinerStreamProcessor.class.getName());
-    private static final String envPrefix = "APP_";
-    private static final String envPropertiesFile = envPrefix + "PROPERTIES_FILE";
 
-    public static void main(final String[] args) throws IOException, RestClientException {
-
-       class Suppressor implements Transformer<Object,GenericRecord, KeyValue<Object,GenericRecord>> {
-            private ProcessorContext context;
-            private long streamTime = 0;
-            private Suppressor other;
-
-
-            class Record {
-                final private long timestamp;
-                final private Object key;
-                final private GenericRecord value;
-
-                public Record(final long timestamp, final Object key, final GenericRecord value) {
-                    this.timestamp = timestamp;
-                    this.key = key;
-                    this.value = value;
-                }
-                public long getTimestamp() {
-                    return timestamp;
-                }
-
-                public Object getKey() {
-                    return key;
-                }
-
-                public GenericRecord getValue() {
-                    return value;
-                }
-            }
-
-            private ArrayDeque<Record> cache = new ArrayDeque<>();
-
-            public void join(final Suppressor other) {
-               this.other = other;
-               other.other = this;
-            }
-
-            @Override
-            public void init(ProcessorContext context) {
-                this.context = context;
-                this.context.schedule(Duration.ofMillis(100), PunctuationType.WALL_CLOCK_TIME, new Punctuator() {
-
-                    @Override
-                    public void punctuate(long timestamp) {
-                        while(!cache.isEmpty()) {
-                            if(streamTime == 0 || streamTime <= other.streamTime()) {
-                                popRecord();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                });
-            }
-
-            public long streamTime() {
-                return streamTime;
-            }
-
-
-            private void popRecord() {
-                if(!cache.isEmpty()) {
-                    final Record record = cache.poll();
-                    streamTime = max(record.getTimestamp(), streamTime);
-                    context.forward(record.getKey(), record.getValue(), To.all().withTimestamp(record.getTimestamp()));
-                    log.info(String.format("popped: %d, %d, %d, %s", record.getTimestamp(), streamTime, other.streamTime(), record.value.toString() ));
-                }
-            }
-
-            @Override
-            public KeyValue<Object, GenericRecord> transform(Object key, GenericRecord value) {
-                log.info(String.format("suppressing: %d, %d, %d, %s", context.timestamp(), streamTime, other.streamTime(), value.toString() ));
-                cache.offer(new Record(context.timestamp(), key, value));
-                context.commit();
-
-                log.info(String.format("finished suppressing: %d, %d, %d", context.timestamp(), streamTime, other.streamTime() ));
-                return null;
-            }
-
-            @Override
-            public void close() {
-
-            }
-        }
+    public static void main(final String[] args) {
 
         final Duration joinWindowBeforeSize = Duration.parse(System.getenv("JOIN_WINDOW_BEFORE_SIZE"));
         final Duration joinWindowAfterSize = Duration.parse(System.getenv("JOIN_WINDOW_AFTER_SIZE"));
@@ -123,7 +32,7 @@ class JoinerStreamProcessor {
 
         final StreamsBuilder builder = new StreamsBuilder();
 
-        final TransformerSupplier streamLogger = () -> new Transformer<Object,GenericRecord, KeyValue<Object,GenericRecord>>() {
+        final TransformerSupplier streamLogger = () -> new Transformer<Object, GenericRecord, KeyValue<Object, GenericRecord>>() {
             private ProcessorContext context;
 
             @Override
@@ -133,8 +42,8 @@ class JoinerStreamProcessor {
 
             @Override
             public KeyValue<Object, GenericRecord> transform(Object key, GenericRecord value) {
-                log.info(String.format("reading : topic=%s, partition=%d, timestamp=%d, offset=%d, key=%s", context.topic(), context.partition(), context.timestamp(), context.offset(), key));
-                return new KeyValue<>(key,value);
+                log.info(String.format("reading : key=%s, timestamp=%d, value=%s", String.valueOf(key), context.timestamp(), String.valueOf(value)));
+                return new KeyValue<>(key, value);
             }
 
             @Override
@@ -143,31 +52,26 @@ class JoinerStreamProcessor {
             }
         };
 
-        final Suppressor leftSuppressor  = new Suppressor();
-        final Suppressor rightSuppressor  = new Suppressor();
-        leftSuppressor.join(rightSuppressor);
-
-        final TransformerSupplier leftSupplier = () -> leftSuppressor;
-        final TransformerSupplier rightSupplier = () -> rightSuppressor;
-
-        final TimestampExtractor tsExtractor = new TimestampExtractor() {
-
-            @Override
-            public long extract(ConsumerRecord<Object, Object> record, long previousTimestamp) {
-                if (record == null) {
-                    return -1;
-                }
-                final GenericRecord r = (GenericRecord) record.value();
-                final Number ts = (Number) r.get("event_time");
-                return ts.longValue();
+        final TimestampExtractor tsExtractor = (record, previousTimestamp) -> {
+            if (record == null) {
+                return -1;
             }
+            final GenericRecord r = (GenericRecord) record.value();
+            final Number ts = (Number) r.get("event_time");
+            return ts.longValue();
         };
 
 
+        final Duration punctuateInterval = Duration.parse("PT0.05S");
+
         final Consumed<Object, GenericRecord> leftConsumed = Consumed.with(tsExtractor);
-        final KStream<Object, GenericRecord> leftStream = builder.stream("x", leftConsumed).transform(leftSupplier).transform(streamLogger);
+        final KStream<Object, GenericRecord> leftStream = builder.stream("x", leftConsumed)
+                .transform(SuppressorTransformer.getSupplier("y", punctuateInterval))
+                .transform(streamLogger);
         final Consumed<Object, GenericRecord> rightConsumed = Consumed.with(tsExtractor);
-        final KStream<Object, GenericRecord> rightStream = builder.stream("y",rightConsumed).transform(rightSupplier).transform(streamLogger);
+        final KStream<Object, GenericRecord> rightStream = builder.stream("y", rightConsumed)
+                .transform(SuppressorTransformer.getSupplier("x", punctuateInterval))
+                .transform(streamLogger);
 
         // setup the join
         final JoinWindows joinWindow = JoinWindows
